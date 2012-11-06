@@ -81,7 +81,7 @@
 			);
 			buildSettings = {
 				BUILD_VARIANTS = "normal debug";
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 24739;
 				FRAMEWORK_SEARCH_PATHS = /usr/local/SecurityPieces/Frameworks;
 				INSTALL_PATH = /usr/sbin;
 				OTHER_ASFLAGS_debug = "$(OTHER_CFLAGS)";
