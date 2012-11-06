@@ -19,12 +19,15 @@
 //
 // systemkeychain command - set up and manipulate system-unlocked keychains
 //
-#include <security_cdsa_client/dlclient.h>
+#include <security_cdsa_client/securestorage.h>
 #include <security_cdsa_client/cryptoclient.h>
+#include <security_cdsa_utilities/uniformrandom.h>
+#include <security_utilities/devrandom.h>
 #include <security_cdsa_client/wrapkey.h>
 #include <security_cdsa_client/genkey.h>
 #include <security_cdsa_utilities/Schema.h>
 #include <securityd_client/ssblob.h>
+#include <securityd_client/ssclient.h>
 #include <Security/cssmapple.h>
 #include <cstdarg>
 
@@ -66,7 +69,6 @@ void test(const char *kcName);
 void notice(const char *fmt, ...);
 void fail(const char *fmt, ...);
 
-void masterKeyIndex(Db &db, CssmOwnedData &index);
 void labelForMasterKey(Db &db, CssmOwnedData &data);
 void deleteKey(Db &db, const CssmData &label);	// delete key with this label
 
@@ -173,13 +175,16 @@ void createSystemKeychain(const char *kcName, const char *passphrase)
 	
 	// create the keychain, using appropriate credentials
 	Db db(dl, kcName);
-	Allocator &alloc = db.allocator();
+	Allocator &alloc = db->allocator();
 	AutoCredentials cred(alloc);	// will leak, but we're quitting soon :-)
 	CSSM_CSP_HANDLE cspHandle = csp->handle();
 	Key masterKey;
 	if (passphrase) {
 		// use this passphrase
 		cred += TypedList(alloc, CSSM_SAMPLE_TYPE_KEYCHAIN_CHANGE_LOCK,
+			new(alloc) ListElement(CSSM_SAMPLE_TYPE_PASSWORD),
+			new(alloc) ListElement(StringData(passphrase)));
+		cred += TypedList(alloc, CSSM_SAMPLE_TYPE_KEYCHAIN_LOCK,
 			new(alloc) ListElement(CSSM_SAMPLE_TYPE_PASSWORD),
 			new(alloc) ListElement(StringData(passphrase)));
 		db->accessCredentials(&cred);
@@ -193,6 +198,11 @@ void createSystemKeychain(const char *kcName, const char *passphrase)
 			new(alloc) ListElement(CSSM_WORDID_SYMMETRIC_KEY),
 			new(alloc) ListElement(CssmData::wrap(cspHandle)),
 			new(alloc) ListElement(CssmData::wrap(static_cast<const CssmKey &>(masterKey))));
+		cred += TypedList(alloc, CSSM_SAMPLE_TYPE_KEYCHAIN_LOCK,
+			new(alloc) ListElement(CSSM_WORDID_SYMMETRIC_KEY),
+			new(alloc) ListElement(CssmData::wrap(cspHandle)),
+			new(alloc) ListElement(CssmData::wrap(static_cast<const CssmKey &>(masterKey))),
+			new(alloc) ListElement(CssmData()));
 		db->accessCredentials(&cred);
 	}
 	db->dbInfo(&KeychainCore::Schema::DBInfo); // Set the standard schema
@@ -225,9 +235,13 @@ void createSystemKeychain(const char *kcName, const char *passphrase)
 	// form the evidence record
 	UnlockBlob blob;
 	blob.initialize(0);
-	CssmAutoData index(Allocator::standard());
-	masterKeyIndex(db, index);
-	memcpy(&blob.signature, index.data(), sizeof(blob.signature));
+	
+	CssmAutoData dbBlobData(Allocator::standard());
+	SecurityServer::ClientSession client(dbBlobData.allocator, dbBlobData.allocator);
+	db->copyBlob(dbBlobData.get());
+	DbBlob *dbBlob = dbBlobData.get().interpretedAs<DbBlob>();
+	
+	memcpy(&blob.signature, &dbBlob->randomSignature, sizeof(dbBlob->randomSignature));
 	memcpy(blob.masterKey, rawKey.data(), sizeof(blob.masterKey));
 
 	// write it out, forcibly overwriting an existing file
@@ -249,14 +263,15 @@ void createSystemKeychain(const char *kcName, const char *passphrase)
 //
 void extract(const char *srcName, const char *dstName)
 {
-	CSP csp(gGuidAppleCSPDL);
-	DL dl(gGuidAppleCSPDL);
+	using namespace KeychainCore;
+
+	CSPDL cspdl(gGuidAppleCSPDL);
 	
 	// open source database
-	Db srcDb(dl, srcName);
+	Db srcDb(cspdl, srcName);
 	
 	// open destination database
-	Db dstDb(dl, dstName);
+	Db dstDb(cspdl, dstName);
 	try {
 		dstDb->open();
 	} catch (const CssmError &err) {
@@ -268,7 +283,7 @@ void extract(const char *srcName, const char *dstName)
 	}
 	
 	// extract master key and place into destination keychain
-	DeriveKey derive(csp, CSSM_ALGID_KEYCHAIN_KEY, CSSM_ALGID_3DES_3KEY, 3 * 64);
+	DeriveKey derive(cspdl, CSSM_ALGID_KEYCHAIN_KEY, CSSM_ALGID_3DES_3KEY, 3 * 64);
 	CSSM_DL_DB_HANDLE dstDlDb = dstDb->handle();
 	derive.add(CSSM_ATTRIBUTE_DL_DB_HANDLE, dstDlDb);
 	CSSM_DL_DB_HANDLE srcDlDb = srcDb->handle();
@@ -290,6 +305,51 @@ void extract(const char *srcName, const char *dstName)
 		deleteKey(dstDb, keyLabel);
 		derive(&dlDbData, spec, masterKey);
 	}
+	
+	// now add a referral record to the source database
+	try {
+		// build attribute vector
+		DLDbIdentifier ident = dstDb->dlDbIdentifier();
+		CssmAutoDbRecordAttributeData refAttrs(9);
+		refAttrs.add(Schema::kUnlockReferralType, uint32(CSSM_APPLE_UNLOCK_TYPE_KEY_DIRECT));
+		refAttrs.add(Schema::kUnlockReferralDbName, ident.dbName());
+		refAttrs.add(Schema::kUnlockReferralDbNetname, CssmData());
+		refAttrs.add(Schema::kUnlockReferralDbGuid, ident.ssuid().guid());
+		refAttrs.add(Schema::kUnlockReferralDbSSID, ident.ssuid().subserviceId());
+		refAttrs.add(Schema::kUnlockReferralDbSSType, ident.ssuid().subserviceType());
+		refAttrs.add(Schema::kUnlockReferralKeyLabel, keyLabel.get());
+		refAttrs.add(Schema::kUnlockReferralKeyAppTag, CssmData());
+		refAttrs.add(Schema::kUnlockReferralPrintName,
+			StringData("Keychain Unlock Referral Record"));
+
+		// no reference data for this form
+		CssmData refData;
+		
+		try {
+			srcDb->insert(CSSM_DL_DB_RECORD_UNLOCK_REFERRAL,
+				&refAttrs,
+				&refData);
+			secdebug("kcreferral", "referral record stored in %s", srcDb->name());
+		} catch (const CssmError &e) {
+			if (e.error != CSSMERR_DL_INVALID_RECORDTYPE)
+				throw;
+
+			// Create the referral relation and retry
+			secdebug("kcreferral", "adding referral schema relation to %s", srcDb->name());
+			srcDb->createRelation(CSSM_DL_DB_RECORD_UNLOCK_REFERRAL, "CSSM_DL_DB_RECORD_UNLOCK_REFERRAL",
+				Schema::UnlockReferralSchemaAttributeCount,
+				Schema::UnlockReferralSchemaAttributeList,
+				Schema::UnlockReferralSchemaIndexCount,
+				Schema::UnlockReferralSchemaIndexList);
+			srcDb->insert(CSSM_DL_DB_RECORD_UNLOCK_REFERRAL,
+				&refAttrs,
+				&refData);
+			secdebug("kcreferral", "referral record inserted in %s (on retry)", srcDb->name());
+		}
+	} catch (...) {
+		fail("cannot store referral in %s", srcDb->name());
+	}
+	
 	notice("%s can now be unlocked with a key in %s", srcName, dstName);
 }
 
@@ -320,21 +380,16 @@ void test(const char *kcName)
 //
 // Utility functions
 //
-void masterKeyIndex(Db &db, CssmOwnedData &index)
-{
-	SecurityServer::ClientSession ss(Allocator::standard(), Allocator::standard());
-	SecurityServer::DbHandle dbHandle;
-	db->passThrough(CSSM_APPLECSPDL_DB_GET_HANDLE, (const void *)NULL, &dbHandle);
-	ss.getDbSuggestedIndex(dbHandle, index.get());
-}
-
-
 void labelForMasterKey(Db &db, CssmOwnedData &label)
 {
-	label = StringData("SYSKC**");	// 8 bytes exactly
-	CssmAutoData index(label.allocator);
-	masterKeyIndex(db, index);
-	label.append(index);
+	// create a random signature
+	char signature[8];
+	UniformRandomBlobs<DevRandomGenerator>().random(signature);
+	
+	// concatenate prefix string with random signature
+	label = StringData("*UNLOCK*");	// 8 bytes exactly
+	label.append(signature, sizeof(signature));
+	assert(label.length() == 8 + sizeof(signature));
 }
 
 

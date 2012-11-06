@@ -16,8 +16,6 @@
 			sourceTree = "<group>";
 		};
 		4CA1FEAE052A3C5800F22E42 = {
-			buildRules = (
-			);
 			buildSettings = {
 				BUILD_VARIANTS = debug;
 				GCC_DYNAMIC_NO_PIC = NO;
@@ -29,8 +27,6 @@
 			name = Development;
 		};
 		4CA1FEAF052A3C5800F22E42 = {
-			buildRules = (
-			);
 			buildSettings = {
 				GCC_ENABLE_FIX_AND_CONTINUE = NO;
 				ZERO_LINK = NO;
@@ -84,8 +80,8 @@
 				4CA1FEB3052A3C6D00F22E42,
 			);
 			buildSettings = {
-				BUILD_VARIANTS = "normal debug profile";
-				CURRENT_PROJECT_VERSION = 3;
+				BUILD_VARIANTS = "normal debug";
+				CURRENT_PROJECT_VERSION = 11;
 				FRAMEWORK_SEARCH_PATHS = /usr/local/SecurityPieces/Frameworks;
 				INSTALL_PATH = /usr/sbin;
 				OTHER_ASFLAGS_debug = "$(OTHER_CFLAGS)";
@@ -113,9 +109,8 @@
 			productReference = 4CA1FEB6052A3C6D00F22E42;
 		};
 		4CA1FEB6052A3C6D00F22E42 = {
-			explicitFileType = "compiled.mach-o.executable";
-			fallbackIsa = PBXFileReference;
-			isa = PBXExecutableFileReference;
+			isa = PBXFileReference;
+			lastKnownFileType = "compiled.mach-o.executable";
 			path = systemkeychain;
 			refType = 3;
 			sourceTree = BUILT_PRODUCTS_DIR;
